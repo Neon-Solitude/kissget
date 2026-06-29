@@ -12,9 +12,11 @@
  *   4. Paste this entire script and press Enter
  *   5. Click through each episode — the collector captures URLs automatically
  *      (you don't need to press Play; the API calls fire when the episode loads)
- *   6. When done, click "Copy Manifest" in the overlay
- *   7. Save the copied JSON to a .json file
- *   8. Run: kissget dl --from-manifest manifest.json -o "C:\Users\onika\Downloads"
+ *   6. When done, either:
+ *        • click "Copy" to copy the manifest JSON to your clipboard, or
+ *        • click "Download" to save it as <drama>_manifest.json (lands in your
+ *          browser's Downloads folder — move it into the repo's manifests/ folder)
+ *   7. Run: kissget dl --from-manifest manifests/<drama>_manifest.json -o "C:\Users\onika\Downloads"
  *
  * Data is stored in localStorage, so it survives accidental page refreshes.
  * Click "Clear" in the overlay to start over for a different show.
@@ -247,7 +249,11 @@
         <button id="__kisskh_copy" style="
           flex:1;background:#00897b;color:#fff;border:none;
           padding:7px 10px;border-radius:6px;cursor:pointer;font-weight:bold
-        ">📋 Copy Manifest</button>
+        ">📋 Copy</button>
+        <button id="__kisskh_download" style="
+          flex:1;background:#1565c0;color:#fff;border:none;
+          padding:7px 10px;border-radius:6px;cursor:pointer;font-weight:bold
+        ">💾 Download</button>
         <button id="__kisskh_clear" style="
           background:#b71c1c;color:#fff;border:none;
           padding:7px 10px;border-radius:6px;cursor:pointer
@@ -264,7 +270,7 @@
       const json = JSON.stringify(manifest, null, 2);
       navigator.clipboard.writeText(json).then(() => {
         this.textContent = "✅ Copied!";
-        setTimeout(() => { this.textContent = "📋 Copy Manifest"; }, 2500);
+        setTimeout(() => { this.textContent = "📋 Copy"; }, 2500);
         console.log(
           "%c[kissget-collector] Manifest copied to clipboard.",
           "color:lime;font-weight:bold"
@@ -278,6 +284,33 @@
         console.log(json);
         alert("Clipboard blocked — manifest printed to console. Copy it from there.");
       });
+    };
+
+    document.getElementById("__kisskh_download").onclick = function () {
+      const manifest = buildManifest();
+      const json = JSON.stringify(manifest, null, 2);
+      // Sanitize the drama slug into a safe filename component.
+      const safe =
+        (manifest.drama || "manifest")
+          .replace(/[\\/:*?"<>|]+/g, "_")
+          .replace(/-+/g, "-")
+          .replace(/^[-_.]+|[-_.]+$/g, "") || "manifest";
+      const filename = `${safe}_manifest.json`;
+      const blob = new Blob([json], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      this.textContent = "✅ Saved!";
+      setTimeout(() => { this.textContent = "💾 Download"; }, 2500);
+      console.log(
+        `%c[kissget-collector] Manifest downloaded as ${filename} → move it into the repo's manifests/ folder.`,
+        "color:lime;font-weight:bold"
+      );
     };
 
     document.getElementById("__kisskh_clear").onclick = function () {
