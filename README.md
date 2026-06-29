@@ -3,7 +3,18 @@
 <div align="center">
    <strong><i>CLI downloader for https://kisskh.nl/ with kkey-free manifest workflow</i></strong>
    <br><br>
-   <a href="https://github.com/Neon-Solitude/kisskh-dl">Fork of kisskh-dl by debakarr</a>
+
+   ![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)
+   ![License](https://img.shields.io/github/license/Neon-Solitude/kisskh-dl?style=for-the-badge)
+   ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-607D8B?style=for-the-badge&logo=windowsterminal&logoColor=white)
+   <br>
+   ![kkey-free](https://img.shields.io/badge/kkeys-NOT%20REQUIRED-brightgreen?style=for-the-badge)
+   ![Workflow](https://img.shields.io/badge/workflow-manifest--based-8B5CF6?style=for-the-badge)
+   ![Downloader](https://img.shields.io/badge/downloader-N__m3u8DL--RE-F97316?style=for-the-badge)
+   <br>
+   ![Fork](https://img.shields.io/badge/fork_of-debakarr%2Fkisskh--dl-6B7280?style=for-the-badge&logo=github&logoColor=white)
+   ![Stars](https://img.shields.io/github/stars/Neon-Solitude/kisskh-dl?style=for-the-badge&logo=github&color=EAB308)
+
 </div>
 
 ---
