@@ -159,3 +159,7 @@ cython_debug/
 
 # VS Code
 .vscode/
+
+# Collected manifests from the browser collector (local only — never committed)
+manifests/*
+!manifests/README.md
