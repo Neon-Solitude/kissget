@@ -15,6 +15,7 @@ from kissget.enums.quality import Quality
 from kissget.helper.decrypt_subtitle import SubtitleDecrypter
 from kissget.kisskh_api import KissKHApi
 from kissget.manifest import ManifestReader
+from kissget.models.search import DramaInfo, Search
 
 load_dotenv()
 
@@ -43,6 +44,41 @@ def _format_episode(num: float) -> str:
     if num == int(num):
         return f"E{int(num):02d}"
     return f"E{num}"
+
+
+def _select_drama(dramas: Search, query: str) -> DramaInfo:
+    """Pick one drama from search results.
+
+    Selection is a CLI concern, so it lives here rather than in the API client.
+    Behavior:
+      * exactly one match  → auto-select it;
+      * multiple + a TTY   → prompt the user to choose;
+      * multiple + no TTY  → raise a clear error (instead of hanging on input()),
+                             so scripts and piped runs fail loudly with guidance.
+    """
+    logger = logging.getLogger(__name__)
+    if len(dramas) == 1:
+        logger.info("One match for %r: %s", query, dramas[0].title)
+        return dramas[0]
+
+    listing = "\n".join(f"  {i}. {d.title}" for i, d in enumerate(dramas, start=1))
+    if not sys.stdin.isatty():
+        raise click.UsageError(
+            f'Multiple dramas match "{query}", but there is no interactive terminal '
+            "to choose one. Re-run with the drama URL instead, e.g.\n"
+            '  kissget dl "https://kisskh.nl/Drama/Show-Name?id=1234"\n\n'
+            f"Matches:\n{listing}"
+        )
+
+    click.echo(listing)
+    while True:
+        try:
+            choice = int(input("Select a drama from above: ") or "0")
+        except ValueError:
+            choice = 0
+        if 1 <= choice <= len(dramas):
+            return dramas[choice - 1]
+        click.echo("Please enter a valid number.")
 
 
 # ── Top-level CLI group ──────────────────────────────────────────────────
@@ -183,7 +219,7 @@ def dl(
         raise click.UsageError(
             "Provide a drama URL/name, or use --from-manifest to download from a manifest file.\n\n"
             "Examples:\n"
-            "  kissget dl \"https://kisskh.nl/Drama/Some-Show?id=1234\"\n"
+            '  kissget dl "https://kisskh.nl/Drama/Some-Show?id=1234"\n'
             "  kissget dl --from-manifest manifest.json -o ~/Downloads"
         )
 
@@ -226,9 +262,7 @@ def dl(
 
             # Subtitles
             filtered_subs = (
-                [s for s in ep.subtitles if s.land in sub_langs or "all" in sub_langs]
-                if ep.subtitles
-                else []
+                [s for s in ep.subtitles if s.land in sub_langs or "all" in sub_langs] if ep.subtitles else []
             )
             if filtered_subs:
                 logger.info("Downloading subtitles for Episode %s...", episode_tag)
@@ -267,10 +301,11 @@ def dl(
             episode_ids = {float(episode_number): int(episode_id[0])}
         drama_name = _sanitize_path_component(parsed_url.path.split("/")[2]).replace("-", "_")
     else:
-        drama = kisskh_api.get_drama_by_query(drama_url_or_name)
-        if drama is None:
+        dramas = kisskh_api.search_dramas_by_query(drama_url_or_name)
+        if len(dramas) == 0:
             logger.warning("No drama found with the query provided...")
             return None
+        drama = _select_drama(dramas, drama_url_or_name)
         drama_id = drama.id
         drama_name = _sanitize_path_component(drama.title)
 
@@ -318,7 +353,8 @@ def dl(
             except Exception as e:
                 logger.warning(
                     "Could not fetch subtitles for Episode %s (key may have expired): %s — skipping subs.",
-                    episode_tag, e,
+                    episode_tag,
+                    e,
                 )
                 continue
             filepath = f"{output_dir}/{drama_name}/{drama_name}_{episode_tag}"
@@ -366,7 +402,8 @@ def dl(
             except Exception as e:
                 logger.warning(
                     "Could not fetch subtitles for Episode %s (key may have expired): %s — skipping subs.",
-                    episode_tag, e,
+                    episode_tag,
+                    e,
                 )
                 subtitles = []
 
@@ -503,17 +540,16 @@ def collect(
         drama_id = int(ids[0])
         drama_name = parsed_url.path.split("/")[2]  # keep display name for manifest
     else:
-        drama = kisskh_api.get_drama_by_query(drama_url_or_name)
-        if drama is None:
+        dramas = kisskh_api.search_dramas_by_query(drama_url_or_name)
+        if len(dramas) == 0:
             logger.warning("No drama found with the query provided...")
             kisskh_api.cleanup()
             return
+        drama = _select_drama(dramas, drama_url_or_name)
         drama_id = drama.id
         drama_name = drama.title
 
-    episode_ids = kisskh_api.get_episode_ids(
-        drama_id=drama_id, start=first, stop=last, skip_recap=skip_recap
-    )
+    episode_ids = kisskh_api.get_episode_ids(drama_id=drama_id, start=first, stop=last, skip_recap=skip_recap)
 
     if not episode_ids:
         logger.warning("No episodes found in range %d–%s.", first, last if last != sys.maxsize else "end")
@@ -555,13 +591,8 @@ def collect(
         # Fetch subtitles
         subs_data: list[dict] = []
         try:
-            subtitles = kisskh_api.get_subtitles(
-                current_episode_id, kkeys.get("sub", ""), *sub_langs
-            )
-            subs_data = [
-                {"lang": sub.land, "label": sub.label, "src": sub.src}
-                for sub in subtitles
-            ]
+            subtitles = kisskh_api.get_subtitles(current_episode_id, kkeys.get("sub", ""), *sub_langs)
+            subs_data = [{"lang": sub.land, "label": sub.label, "src": sub.src} for sub in subtitles]
         except Exception as e:
             logger.debug("Subtitle error for Episode %s: %s", episode_tag, e)
 
@@ -592,9 +623,7 @@ def collect(
 
     output_path = Path(output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(
-        json.dumps(manifest_data, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    output_path.write_text(json.dumps(manifest_data, indent=2, ensure_ascii=False), encoding="utf-8")
 
     with_stream = sum(1 for e in manifest_episodes if e["stream_url"])
     with_subs = sum(1 for e in manifest_episodes if e["subtitles"])
@@ -739,7 +768,7 @@ def open_browser(port: int, browser_path: str | None) -> None:
     try:
         urllib.request.urlopen(f"http://localhost:{port}/json/version", timeout=2)
         click.echo(f"A browser with CDP is already running on port {port}.")
-        click.echo(f"Run: kisskh collect \"DRAMA_URL\" --cdp-url http://localhost:{port}")
+        click.echo(f'Run: kisskh collect "DRAMA_URL" --cdp-url http://localhost:{port}')
         return
     except Exception:
         pass  # Not running — launch it
@@ -747,8 +776,7 @@ def open_browser(port: int, browser_path: str | None) -> None:
     exe = browser_path or _find_browser()
     if exe is None:
         raise click.ClickException(
-            "Could not find Chrome or Edge. Install one of them, or use "
-            "--browser-path to specify the executable."
+            "Could not find Chrome or Edge. Install one of them, or use --browser-path to specify the executable."
         )
 
     profile_dir = Path.home() / ".kisskh" / "browser_profile"
@@ -761,7 +789,9 @@ def open_browser(port: int, browser_path: str | None) -> None:
         "https://kisskh.nl",
     ]
 
-    subprocess.Popen(cmd)
+    # Vetted: cmd is a fixed argument list (no shell); exe is a resolved
+    # browser path and the rest are constant flags — not shell input.
+    subprocess.Popen(cmd)  # noqa: S603
 
     click.echo(f"Launched: {Path(exe).name}")
     click.echo(f"  Profile : {profile_dir}")

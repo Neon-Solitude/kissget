@@ -35,6 +35,7 @@ def _check_playwright() -> bool:
     if _playwright_available is None:
         try:
             import playwright  # noqa: F401
+
             _playwright_available = True
         except ImportError:
             _playwright_available = False
@@ -46,6 +47,7 @@ def _check_stealth() -> bool:
     if _stealth_available is None:
         try:
             import playwright_stealth  # noqa: F401
+
             _stealth_available = True
         except ImportError:
             _stealth_available = False
@@ -81,7 +83,7 @@ class KkeyProvider:
     """
 
     _playwright_started = False
-    _context = None      # BrowserContext (Playwright persistent or CDP)
+    _context = None  # BrowserContext (Playwright persistent or CDP)
     _cdp_browser = None  # Browser object only in CDP mode
     _user_data_dir = None
 
@@ -120,9 +122,7 @@ class KkeyProvider:
             # ── CDP mode: attach to the user's real Chrome/Edge ──────────────
             logger.info("Connecting to browser via CDP at %s ...", self.cdp_url)
             try:
-                KkeyProvider._cdp_browser = KkeyProvider._pw.chromium.connect_over_cdp(
-                    self.cdp_url
-                )
+                KkeyProvider._cdp_browser = KkeyProvider._pw.chromium.connect_over_cdp(self.cdp_url)
             except Exception as e:
                 raise ConnectionError(
                     f"Could not connect to a browser at {self.cdp_url}.\n"
@@ -132,9 +132,7 @@ class KkeyProvider:
                 ) from e
 
             contexts = KkeyProvider._cdp_browser.contexts
-            KkeyProvider._context = (
-                contexts[0] if contexts else KkeyProvider._cdp_browser.new_context()
-            )
+            KkeyProvider._context = contexts[0] if contexts else KkeyProvider._cdp_browser.new_context()
             logger.info("Connected — using existing browser session.")
         else:
             # ── Playwright mode: launch our own Chromium ─────────────────────
@@ -178,6 +176,7 @@ class KkeyProvider:
         if not self.cdp_url:
             if _check_stealth():
                 from playwright_stealth import Stealth
+
                 Stealth().apply_stealth_sync(page)
                 logger.debug("playwright-stealth applied")
             else:
@@ -253,9 +252,7 @@ class KkeyProvider:
 
             # Poll for kkeys; headed/CDP modes get longer timeout so the user
             # can click Play manually if our automation misses the button.
-            poll_timeout = (
-                60 if (self.cdp_url or not self.headless) else self.playwright_timeout / 1000
-            )
+            poll_timeout = 60 if (self.cdp_url or not self.headless) else self.playwright_timeout / 1000
             if self.cdp_url or not self.headless:
                 logger.info(
                     "Waiting up to %.0fs for kkeys — click Play in the browser if needed...",
@@ -299,9 +296,9 @@ class KkeyProvider:
                 "kisskh.nl is blocking the automated Playwright browser.\n"
                 "Use your real Chrome/Edge instead:\n\n"
                 "  kisskh open-browser          # launch Chrome with CDP\n"
-                "  kisskh collect \"URL\" --cdp-url http://localhost:9222\n\n"
+                '  kisskh collect "URL" --cdp-url http://localhost:9222\n\n'
                 "Or pass pre-captured keys directly:\n"
-                "  kisskh collect \"URL\" --stream-key KEY --sub-key KEY"
+                '  kisskh collect "URL" --stream-key KEY --sub-key KEY'
             )
 
         return captured_kkeys

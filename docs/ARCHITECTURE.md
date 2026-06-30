@@ -199,7 +199,8 @@ sequenceDiagram
 
     User->>CLI: dl "URL or query"
     alt query, not URL
-        CLI->>API: get_drama_by_query → interactive pick
+        CLI->>API: search_dramas_by_query
+        CLI->>CLI: _select_drama (auto-pick / prompt)
     end
     CLI->>API: get_episode_ids(...)
     loop each episode

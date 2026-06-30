@@ -7,10 +7,14 @@ from urllib.parse import urlparse
 
 import requests
 
+from kissget.enums.quality import Quality
 from kissget.helper.decrypt_subtitle import SubtitleDecrypter
 from kissget.models.sub import SubItem
 
 logger = logging.getLogger(__name__)
+
+# Quality ladder (heights) derived from the Quality enum, ascending: [360, 480, 540, 720, 1080]
+_QUALITY_HEIGHTS = sorted(int(q.value.rstrip("p")) for q in Quality)
 
 # Well-known locations for N_m3u8DL-RE.exe on Windows
 _N_M3U8DL_RE_SEARCH_PATHS = [
@@ -46,6 +50,36 @@ def _find_ffmpeg(n_m3u8dl_re_path: str | None = None) -> str | None:
     return shutil.which("ffmpeg") or shutil.which("ffmpeg.exe")
 
 
+def _video_select_args(quality: str) -> list[str]:
+    """Build N_m3u8DL-RE track-selection args that honor the requested quality.
+
+    For the top of the ladder (default 1080p) we keep ``--auto-select`` so the
+    common path is byte-identical to the previous behavior. For a lower quality
+    we emit ``--select-video res="x(<=heights)$":for=best``, which matches the
+    requested height and every lower one and picks the best of those — mirroring
+    yt-dlp's ``height<=N`` then "best available" fallback. We add ``-sa best`` so
+    audio is still selected once ``--auto-select`` is no longer in play.
+
+    If the regex matches nothing (e.g. an unusual stream), N_m3u8DL-RE exits
+    non-zero and the caller falls back to yt-dlp, which applies the same logic.
+    """
+    try:
+        target = int(quality.rstrip("p"))
+    except ValueError:
+        return ["--auto-select"]
+
+    # At/above the highest known tier there is nothing to constrain — take best.
+    if target >= _QUALITY_HEIGHTS[-1]:
+        return ["--auto-select"]
+
+    eligible = [h for h in _QUALITY_HEIGHTS if h <= target]
+    if not eligible:
+        return ["--auto-select"]
+
+    alternation = "|".join(str(h) for h in sorted(eligible, reverse=True))
+    return ["--select-video", f'res="x({alternation})$":for=best', "--select-audio", "best"]
+
+
 class Downloader:
     def __init__(
         self,
@@ -55,6 +89,7 @@ class Downloader:
         self.referer = referer
 
         # Resolve N_m3u8DL-RE path: explicit > auto-detect > None (fallback to yt-dlp)
+        self._n_m3u8dl_re: str | None
         if n_m3u8dl_re_path:
             self._n_m3u8dl_re = n_m3u8dl_re_path
         else:
@@ -111,16 +146,23 @@ class Downloader:
             logger.info("Already downloaded: %s", mp4_path.name)
             return
 
+        binary = self._n_m3u8dl_re
+        assert binary is not None  # caller only dispatches here when the binary is set
+
         cmd = [
-            self._n_m3u8dl_re,
+            binary,
             video_stream_url,
-            "--save-dir", save_dir,
-            "--save-name", save_name,
+            "--save-dir",
+            save_dir,
+            "--save-name",
+            save_name,
             "--del-after-done",
             "--no-log",
-            "--auto-select",
-            "-H", f"Referer: {self.referer}",
-            "-H", (
+            *_video_select_args(quality),
+            "-H",
+            f"Referer: {self.referer}",
+            "-H",
+            (
                 "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/147.0.0.0 Safari/537.36"
@@ -135,16 +177,16 @@ class Downloader:
         logger.debug("Running: %s", " ".join(cmd[:4]) + " ...")
 
         try:
-            result = subprocess.run(
+            # Vetted: cmd is a fixed argument list (no shell), built from the
+            # detected binary path plus the stream URL/flags — not shell input.
+            result = subprocess.run(  # noqa: S603
                 cmd,
                 capture_output=False,
                 text=True,
                 timeout=600,  # 10 minute timeout per episode
             )
             if result.returncode != 0:
-                logger.warning(
-                    "N_m3u8DL-RE exited with code %d, falling back to yt-dlp", result.returncode
-                )
+                logger.warning("N_m3u8DL-RE exited with code %d, falling back to yt-dlp", result.returncode)
                 self._download_with_yt_dlp(video_stream_url, filepath, quality)
         except FileNotFoundError:
             logger.warning("N_m3u8DL-RE not found at %s, falling back to yt-dlp", self._n_m3u8dl_re)
@@ -190,7 +232,14 @@ class Downloader:
             logger.info("Downloading %s sub...", subtitle.label)
             extension = os.path.splitext(urlparse(subtitle.src).path)[-1]
             sub_url = self._normalize_stream_url(subtitle.src)
-            response = requests.get(sub_url, timeout=60)
+            try:
+                response = requests.get(sub_url, timeout=60)
+                response.raise_for_status()
+            except requests.RequestException as e:
+                # Skip this subtitle rather than writing an error page as a .srt
+                # and rather than aborting the whole episode/batch.
+                logger.warning("Failed to download %s sub (%s) — skipping.", subtitle.label, e)
+                continue
             output_path = Path(f"{filepath}.{subtitle.land}{extension}")
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_bytes(response.content)

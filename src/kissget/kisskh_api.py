@@ -9,7 +9,7 @@ from urllib.parse import quote, urljoin
 import requests
 
 from kissget.models.drama import Drama
-from kissget.models.search import DramaInfo, Search
+from kissget.models.search import Search
 from kissget.models.sub import Sub, SubItem
 
 logger = logging.getLogger(__name__)
@@ -123,25 +123,6 @@ class KissKHApi:
         stream_api_url = self._stream_api_url(episode_id=episode_id, kkey=kkey)
         response = self._request(stream_api_url, referer=self._build_episode_referer(episode_id))
         return response.json().get("Video")
-
-    def get_drama_by_query(self, query: str) -> DramaInfo | None:
-        """Select specific drama from a search query."""
-        dramas = self.search_dramas_by_query(query=query)
-        if len(dramas) == 0:
-            logger.warning("No drama with query %s found! Make sure you spelled everything correct.", query)
-            return None
-
-        user_selection = 0
-        while user_selection < 1 or user_selection > len(dramas):
-            for index, drama in enumerate(dramas, start=1):
-                logger.info("%s. %s", index, drama.title)
-            try:
-                user_selection = int(input("Select a drama from above: ") or "0")
-            except ValueError:
-                logger.warning("Please enter a valid number.")
-                user_selection = 0
-
-        return dramas[user_selection - 1]
 
     def _build_episode_referer(
         self,

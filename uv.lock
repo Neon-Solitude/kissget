@@ -761,8 +761,8 @@ wheels = [
 ]
 
 [[package]]
-name = "kisskh-downloader"
-version = "0.2.1"
+name = "kissget"
+version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
