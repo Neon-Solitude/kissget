@@ -13,9 +13,9 @@ from dotenv import load_dotenv
 from kissget.downloader import Downloader, NetworkBlockError
 from kissget.enums.quality import Quality
 from kissget.helper.decrypt_subtitle import SubtitleDecrypter
-from kissget.kisskh_api import KissKHApi
 from kissget.manifest import ManifestReader
 from kissget.models.search import DramaInfo, Search
+from kissget.providers import get_provider
 
 load_dotenv()
 
@@ -249,6 +249,12 @@ def dl(
         manifest = ManifestReader.from_file(from_manifest)
         drama_name = _sanitize_path_component(manifest.drama_name)
 
+        # A manifest may declare its own Referer (e.g. AsiaFlix CDN needs an
+        # asiaflix Referer rather than the kisskh default).
+        if manifest.referer:
+            logger.debug("Using manifest Referer for downloads: %s", manifest.referer)
+            downloader.referer = manifest.referer
+
         decrypter_m: SubtitleDecrypter | None = None
         if decrypt_subtitle:
             assert key is not None and initialization_vector is not None
@@ -287,24 +293,22 @@ def dl(
         return
 
     # ── Standard API-based download path ──────────────────────────────────
-    kisskh_api = KissKHApi(base_url=base_url, headed=headed)
+    url_arg = drama_url_or_name if validators.url(drama_url_or_name) else None
+    provider = get_provider(url_arg, base_url=os.getenv("KISSKH_BASE_URL"), headed=headed)
+    downloader.referer = provider.referer
     episode_ids: dict[float, int] = {}
 
-    if validators.url(drama_url_or_name):
-        parsed_url = urlparse(drama_url_or_name)
-        ids = parse_qs(parsed_url.query).get("id")
-        if ids is None:
-            raise FileNotFoundError("Not a valid url for a drama!")
-        drama_id = int(ids[0])
-        episode_id = parse_qs(parsed_url.query).get("ep")
-        episode_number = None
-        if episode_string := re.search(r"Episode-(\d+)", parsed_url.path):
-            episode_number = episode_string.group(1)
-        if episode_id and episode_number:
-            episode_ids = {float(episode_number): int(episode_id[0])}
-        drama_name = _sanitize_path_component(parsed_url.path.split("/")[2]).replace("-", "_")
+    if url_arg:
+        try:
+            target = provider.parse_url(url_arg)
+        except ValueError as exc:
+            raise click.UsageError(str(exc))
+        drama_id = target.drama_id
+        if target.episode_ids:
+            episode_ids = target.episode_ids
+        drama_name = _sanitize_path_component(target.drama_slug).replace("-", "_")
     else:
-        dramas = kisskh_api.search_dramas_by_query(drama_url_or_name)
+        dramas = provider.search(drama_url_or_name)
         if len(dramas) == 0:
             logger.warning("No drama found with the query provided...")
             return None
@@ -313,7 +317,7 @@ def dl(
         drama_name = _sanitize_path_component(drama.title)
 
     if not episode_ids:
-        episode_ids = kisskh_api.get_episode_ids(drama_id=drama_id, start=first, stop=last, skip_recap=skip_recap)
+        episode_ids = provider.get_episode_ids(drama_id=drama_id, start=first, stop=last, skip_recap=skip_recap)
 
     # Resolve the kkeys once (they come from env vars when set manually)
     if stream_key and sub_key:
@@ -329,7 +333,7 @@ def dl(
         episode_tag = _format_episode(episode_number)
         logger.info("Generating authentication token for Episode %s...", episode_tag)
         try:
-            return kisskh_api.generate_kkeys(
+            return provider.generate_auth(
                 drama_id=drama_id,
                 episode_id=current_episode_id,
                 episode_number=int(episode_number),
@@ -352,7 +356,7 @@ def dl(
             if kkeys is None:
                 continue
             try:
-                subtitles = kisskh_api.get_subtitles(current_episode_id, kkeys.get("sub", ""), *sub_langs)
+                subtitles = provider.get_subtitles(current_episode_id, kkeys, *sub_langs)
             except Exception as e:
                 logger.warning(
                     "Could not fetch subtitles for Episode %s (key may have expired): %s — skipping subs.",
@@ -375,7 +379,7 @@ def dl(
             if kkeys is None:
                 continue
             try:
-                video_stream_url = kisskh_api.get_stream_url(current_episode_id, kkeys.get("stream", ""))
+                video_stream_url = provider.get_stream_url(current_episode_id, kkeys)
             except Exception as e:
                 logger.error("Could not fetch stream URL for Episode %s: %s — skipping.", episode_tag, e)
                 continue
@@ -404,7 +408,7 @@ def dl(
                 continue
 
             try:
-                subtitles = kisskh_api.get_subtitles(current_episode_id, kkeys.get("sub", ""), *sub_langs)
+                subtitles = provider.get_subtitles(current_episode_id, kkeys, *sub_langs)
             except Exception as e:
                 logger.warning(
                     "Could not fetch subtitles for Episode %s (key may have expired): %s — skipping subs.",
@@ -423,7 +427,7 @@ def dl(
                 continue
 
             try:
-                video_stream_url = kisskh_api.get_stream_url(current_episode_id, kkeys.get("stream", ""))
+                video_stream_url = provider.get_stream_url(current_episode_id, kkeys)
             except Exception as e:
                 logger.error("Could not fetch stream URL for Episode %s: %s — skipping.", episode_tag, e)
                 continue
@@ -444,7 +448,7 @@ def dl(
                 continue
             downloader.download_subtitles(subtitles, filepath, decrypter)
 
-    kisskh_api.cleanup()
+    provider.cleanup()
 
 
 # ── Collect command ──────────────────────────────────────────────────────
@@ -522,9 +526,8 @@ def collect(
         kisskh dl --from-manifest "Customized_Lover__2026__manifest.json" -o "C:\\Users\\you\\Downloads"
     """
     logger = logging.getLogger(__name__)
-    base_url = _resolve_base_url()
 
-    # CLI flags take precedence over env vars; inject into env so generate_kkeys picks them up.
+    # CLI flags take precedence over env vars; inject into env so generate_auth picks them up.
     if stream_key:
         os.environ["KISSKH_STREAM_KEY"] = stream_key
     if sub_key:
@@ -538,31 +541,32 @@ def collect(
             "get fresh keys from your browser's DevTools and re-run.\n"
         )
 
-    kisskh_api = KissKHApi(base_url=base_url, headed=headed, cdp_url=cdp_url)
+    url_arg = drama_url_or_name if validators.url(drama_url_or_name) else None
+    provider = get_provider(url_arg, base_url=os.getenv("KISSKH_BASE_URL"), headed=headed, cdp_url=cdp_url)
 
     # ── Resolve drama ────────────────────────────────────────────────────
-    if validators.url(drama_url_or_name):
-        parsed_url = urlparse(drama_url_or_name)
-        ids = parse_qs(parsed_url.query).get("id")
-        if ids is None:
-            raise click.UsageError("URL must contain a ?id= parameter.")
-        drama_id = int(ids[0])
-        drama_name = parsed_url.path.split("/")[2]  # keep display name for manifest
+    if url_arg:
+        try:
+            target = provider.parse_url(url_arg)
+        except ValueError as exc:
+            raise click.UsageError(str(exc))
+        drama_id = target.drama_id
+        drama_name = target.drama_slug  # keep display name for manifest
     else:
-        dramas = kisskh_api.search_dramas_by_query(drama_url_or_name)
+        dramas = provider.search(drama_url_or_name)
         if len(dramas) == 0:
             logger.warning("No drama found with the query provided...")
-            kisskh_api.cleanup()
+            provider.cleanup()
             return
         drama = _select_drama(dramas, drama_url_or_name)
         drama_id = drama.id
         drama_name = drama.title
 
-    episode_ids = kisskh_api.get_episode_ids(drama_id=drama_id, start=first, stop=last, skip_recap=skip_recap)
+    episode_ids = provider.get_episode_ids(drama_id=drama_id, start=first, stop=last, skip_recap=skip_recap)
 
     if not episode_ids:
         logger.warning("No episodes found in range %d–%s.", first, last if last != sys.maxsize else "end")
-        kisskh_api.cleanup()
+        provider.cleanup()
         return
 
     click.echo(f"Collecting {len(episode_ids)} episode(s) for: {drama_name}")
@@ -576,7 +580,7 @@ def collect(
 
         # Get kkeys (Playwright or env vars)
         try:
-            kkeys = kisskh_api.generate_kkeys(
+            kkeys = provider.generate_auth(
                 drama_id=drama_id,
                 episode_id=current_episode_id,
                 episode_number=int(episode_number),
@@ -590,7 +594,7 @@ def collect(
         # Fetch stream URL
         stream_url: str | None = None
         try:
-            stream_url = kisskh_api.get_stream_url(current_episode_id, kkeys.get("stream", ""))
+            stream_url = provider.get_stream_url(current_episode_id, kkeys)
             if stream_url and "tickcounter" in stream_url:
                 click.echo(" (not yet released — skipping stream)")
                 stream_url = None
@@ -600,7 +604,7 @@ def collect(
         # Fetch subtitles
         subs_data: list[dict] = []
         try:
-            subtitles = kisskh_api.get_subtitles(current_episode_id, kkeys.get("sub", ""), *sub_langs)
+            subtitles = provider.get_subtitles(current_episode_id, kkeys, *sub_langs)
             subs_data = [{"lang": sub.land, "label": sub.label, "src": sub.src} for sub in subtitles]
         except Exception as e:
             logger.debug("Subtitle error for Episode %s: %s", episode_tag, e)
@@ -617,7 +621,7 @@ def collect(
         subs_status = f"{len(subs_data)} sub(s)" if subs_data else "no subs"
         click.echo(f" {stream_status}, {subs_status}")
 
-    kisskh_api.cleanup()
+    provider.cleanup()
 
     if not manifest_episodes:
         click.echo("No episodes collected — manifest not written.")
@@ -691,12 +695,11 @@ def get_key(drama_url: str) -> None:
 
     drama_slug = _sanitize_path_component(parsed_url.path.split("/")[2]).replace("-", "_")
 
-    base_url = _resolve_base_url()
-    kisskh_api = KissKHApi(base_url=base_url)
+    provider = get_provider(drama_url, base_url=os.getenv("KISSKH_BASE_URL"))
 
     click.echo("Launching browser to extract kkey tokens...")
     try:
-        kkeys = kisskh_api.generate_kkeys(
+        kkeys = provider.generate_auth(
             drama_id=drama_id,
             episode_id=episode_id,
             episode_number=episode_number,
@@ -705,7 +708,7 @@ def get_key(drama_url: str) -> None:
     except Exception as e:
         raise click.ClickException(f"Failed to generate kkey: {e}")
     finally:
-        kisskh_api.cleanup()
+        provider.cleanup()
 
     click.echo("")
     click.echo("─" * 50)
